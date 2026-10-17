@@ -88,7 +88,8 @@ extension Data {
         return try self.process(operation: COMPRESSION_STREAM_DECODE, size: size, bufferSize: bufferSize,
                                 skipCRC32: skipCRC32, provider: provider, consumer: consumer)
         #else
-        return try self.decode(bufferSize: bufferSize, skipCRC32: skipCRC32, provider: provider, consumer: consumer)
+        return try self.decode(size: size, bufferSize: bufferSize, skipCRC32: skipCRC32,
+                               provider: provider, consumer: consumer)
         #endif
     }
 }
@@ -214,7 +215,8 @@ extension Data {
         return zipCRC32
     }
 
-    static func decode(bufferSize: Int, skipCRC32: Bool, provider: Provider, consumer: Consumer) throws -> CRC32 {
+    static func decode(size: Int64, bufferSize: Int, skipCRC32: Bool,
+                       provider: Provider, consumer: Consumer) throws -> CRC32 {
         var stream = z_stream()
         let streamSize = Int32(MemoryLayout<z_stream>.size)
         var result = inflateInit2_(&stream, -MAX_WBITS, ZLIB_VERSION, streamSize)
@@ -223,8 +225,14 @@ extension Data {
         var unzipCRC32 = CRC32(0)
         var position: Int64 = 0
         repeat {
-            stream.avail_in = UInt32(bufferSize)
-            var chunk = try provider(position, bufferSize)
+            // Read no further than the compressed data, as `process` does, and tell zlib only about
+            // the bytes that came: a chunk shorter than `bufferSize` must not be read past its end.
+            let readSize = Int(Swift.min(size - position, Int64(bufferSize)))
+            var chunk = try provider(position, readSize)
+            // The compressed data (or the file) ended before the deflate stream did: without this,
+            // a stream that never ends would be read again and again, forever.
+            guard !chunk.isEmpty else { throw CompressionError.corruptedData }
+            stream.avail_in = UInt32(chunk.count)
             position += Int64(chunk.count)
             try chunk.withUnsafeMutableBytes { (rawBufferPointer) in
                 if let baseAddress = rawBufferPointer.baseAddress, rawBufferPointer.count > 0 {
